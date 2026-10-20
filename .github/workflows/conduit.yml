@@ -86,19 +86,26 @@ jobs:
         env:
           NEBIUS_API_KEY: ${{ secrets.NEBIUS_API_KEY }}
           CONDUIT_APPLY_MODEL: nvidia/nemotron-3-super-120b-a12b
+          BASE_REF: ${{ github.base_ref }}
         run: |
           set -euo pipefail
-          TO_VERSION="$(python - <<'PY'
+          git fetch origin "${BASE_REF}" --depth=1
+          parse_openai_pin() {
+            python - "$1" <<'PY'
           import pathlib, re, sys
-          text = pathlib.Path("requirements.txt").read_text(encoding="utf-8")
+          text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
           m = re.search(r"(?mi)^\s*openai\s*==\s*([^\s#]+)", text)
           if not m:
-              sys.exit("openai pin not found in requirements.txt")
+              sys.exit(f"openai pin not found in {sys.argv[1]}")
           print(m.group(1).strip())
           PY
-          )"
+          }
+          git show "origin/${BASE_REF}:requirements.txt" > /tmp/base-requirements.txt
+          FROM_VERSION="$(parse_openai_pin /tmp/base-requirements.txt)"
+          TO_VERSION="$(parse_openai_pin requirements.txt)"
+          echo "from_version=${FROM_VERSION}" >> "$GITHUB_OUTPUT"
           echo "to_version=${TO_VERSION}" >> "$GITHUB_OUTPUT"
-          conduit impact --dep openai --to "${TO_VERSION}" --json > impact.json
+          conduit impact --dep openai --from "${FROM_VERSION}" --to "${TO_VERSION}" --json > impact.json
           set +e
           conduit apply --impact impact.json --write --test-cmd "python -m pytest -q" --json > apply.json
           echo "apply_exit=$?" >> "$GITHUB_OUTPUT"
@@ -109,11 +116,13 @@ jobs:
         if: steps.secret.outputs.present == 'true'
         uses: actions/github-script@v7
         env:
+          FROM_VERSION: ${{ steps.conduit.outputs.from_version }}
           TO_VERSION: ${{ steps.conduit.outputs.to_version }}
         with:
           script: |
             const fs = require('fs');
             const marker = '<!-- conduit-hackathon-demo -->';
+            const fromVersion = process.env.FROM_VERSION || '';
             const toVersion = process.env.TO_VERSION || '';
 
             function readJson(path) {
@@ -168,7 +177,7 @@ jobs:
               marker,
               '## Conduit',
               '',
-              `Impact for \`openai\` → \`${toVersion}\`. Apply model: \`nvidia/nemotron-3-super-120b-a12b\`.`,
+              `Impact for \`openai\` \`${fromVersion}\` → \`${toVersion}\`. Apply model: \`nvidia/nemotron-3-super-120b-a12b\`.`,
               '',
               '### Impact',
               '',
