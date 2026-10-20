@@ -6,11 +6,12 @@ import openai
 
 
 def summarize(text: str) -> str:
-    resp = openai.ChatCompletion.create(
+    client = openai.OpenAI()
+    resp = client.chat.completions.create(
         model="gpt-3.5-turbo",
-        messages=[{"role": "user", "content": f"Summarize:\n{text}"}],
+        messages=[{"role": "user", "content": f"Summarize:\n{text}"}]
     )
-    return resp["choices"][0]["message"]["content"]
+    return resp.choices[0].message.content
 
 
 if __name__ == "__main__":
