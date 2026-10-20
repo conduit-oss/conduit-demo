@@ -7,12 +7,12 @@ import anthropic
 
 def complete(prompt: str, api_key: str) -> str:
     client = anthropic.Anthropic(api_key=api_key)
-    resp = client.completions.create(
-        model="claude-2.1",
-        max_tokens_to_sample=64,
-        prompt=f"{anthropic.HUMAN_PROMPT} {prompt}{anthropic.AI_PROMPT}",
+    message = client.messages.create(
+        model="claude-3-haiku-20240307",
+        max_tokens=64,
+        messages=[{"role": "user", "content": prompt}]
     )
-    return resp.completion
+    return message.content[0].text
 
 
 if __name__ == "__main__":
