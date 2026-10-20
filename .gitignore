@@ -5,6 +5,7 @@ venv/
 .pytest_cache/
 impact.json
 apply.json
+apply.diff
 .conduit/
 *.egg-info/
 dist/
