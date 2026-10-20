@@ -1,0 +1,225 @@
+name: Conduit
+
+on:
+  pull_request:
+    paths:
+      - "**/requirements*.txt"
+      - "**/pyproject.toml"
+      - "**/poetry.lock"
+      - "**/Pipfile.lock"
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout PR branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Check NEBIUS_API_KEY
+        id: secret
+        env:
+          NEBIUS_API_KEY: ${{ secrets.NEBIUS_API_KEY }}
+        run: |
+          if [ -z "${NEBIUS_API_KEY}" ]; then
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Comment when secret is missing
+        if: steps.secret.outputs.present != 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const marker = '<!-- conduit-hackathon-demo -->';
+            const body = [
+              marker,
+              '## Conduit',
+              '',
+              'Missing repository secret `NEBIUS_API_KEY`.',
+              '',
+              'Add it under **Settings → Secrets and variables → Actions**, then re-run this workflow.',
+              'Conduit will not merge; it only comments and (when the secret is set) pushes a verified fix commit to this branch.',
+            ].join('\n');
+            const { owner, repo } = context.repo;
+            const issue_number = context.issue.number;
+            const { data: comments } = await github.rest.issues.listComments({
+              owner, repo, issue_number, per_page: 100,
+            });
+            const existing = comments.find(c => c.body && c.body.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner, repo, comment_id: existing.id, body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner, repo, issue_number, body,
+              });
+            }
+
+      - name: Stop without secret
+        if: steps.secret.outputs.present != 'true'
+        run: echo "NEBIUS_API_KEY not set; exiting successfully."
+
+      - name: Install Conduit and app deps
+        if: steps.secret.outputs.present == 'true'
+        run: |
+          python -m pip install -U pip
+          pip install "git+https://github.com/conduit-oss/conduit.git#subdirectory=conduit"
+          pip install -r requirements.txt
+
+      - name: Conduit impact + apply
+        if: steps.secret.outputs.present == 'true'
+        id: conduit
+        env:
+          NEBIUS_API_KEY: ${{ secrets.NEBIUS_API_KEY }}
+          CONDUIT_APPLY_MODEL: nvidia/nemotron-3-super-120b-a12b
+        run: |
+          set -euo pipefail
+          TO_VERSION="$(python - <<'PY'
+          import pathlib, re, sys
+          text = pathlib.Path("requirements.txt").read_text(encoding="utf-8")
+          m = re.search(r"(?mi)^\s*openai\s*==\s*([^\s#]+)", text)
+          if not m:
+              sys.exit("openai pin not found in requirements.txt")
+          print(m.group(1).strip())
+          PY
+          )"
+          echo "to_version=${TO_VERSION}" >> "$GITHUB_OUTPUT"
+          conduit impact --dep openai --to "${TO_VERSION}" --json > impact.json
+          set +e
+          conduit apply --impact impact.json --write --test-cmd "python -m pytest -q" --json > apply.json
+          echo "apply_exit=$?" >> "$GITHUB_OUTPUT"
+          set -e
+          git diff -- summarize.py > apply.diff || true
+
+      - name: Comment impact, apply status, and diff
+        if: steps.secret.outputs.present == 'true'
+        uses: actions/github-script@v7
+        env:
+          TO_VERSION: ${{ steps.conduit.outputs.to_version }}
+        with:
+          script: |
+            const fs = require('fs');
+            const marker = '<!-- conduit-hackathon-demo -->';
+            const toVersion = process.env.TO_VERSION || '';
+
+            function readJson(path) {
+              try {
+                return JSON.parse(fs.readFileSync(path, 'utf8'));
+              } catch (e) {
+                return null;
+              }
+            }
+
+            const impact = readJson('impact.json') || {};
+            const apply = readJson('apply.json') || {};
+            let diff = '';
+            try {
+              diff = fs.readFileSync('apply.diff', 'utf8');
+            } catch (e) {
+              diff = '';
+            }
+            if (!diff.trim()) {
+              const results = apply.results || [];
+              diff = results.map(r => r.diff || '').filter(Boolean).join('\n\n');
+            }
+
+            const impactRows = [];
+            for (const item of (impact.impacts || [])) {
+              for (const site of (item.sites || [])) {
+                impactRows.push(
+                  `| \`${item.dependency}\` | ${item.from_version || ''} → ${item.to_version || toVersion} | ${site.path}:${site.line} | ${item.change || ''} | ${item.confidence || site.confidence || ''} |`
+                );
+              }
+            }
+            if (!impactRows.length) {
+              impactRows.push('| _(none)_ | | | | |');
+            }
+
+            const applyRows = [];
+            for (const item of (apply.results || [])) {
+              applyRows.push(
+                `| ${item.path || ''}:${item.line || ''} | ${item.status || ''} | ${(item.why || item.error || '').replace(/\|/g, '\\|')} |`
+              );
+            }
+            if (!applyRows.length) {
+              applyRows.push('| _(none)_ | | |');
+            }
+
+            const notes = (impact.notes || []).map(n => `- ${n}`).join('\n');
+            const diffBlock = diff.trim()
+              ? ('```diff\n' + diff.trim().slice(0, 60000) + '\n```')
+              : '_No file diff produced._';
+
+            const parts = [
+              marker,
+              '## Conduit',
+              '',
+              `Impact for \`openai\` → \`${toVersion}\`. Apply model: \`nvidia/nemotron-3-super-120b-a12b\`.`,
+              '',
+              '### Impact',
+              '',
+              '| Dependency | Versions | Site | Change | Confidence |',
+              '| --- | --- | --- | --- | --- |',
+              ...impactRows,
+              '',
+            ];
+            if (notes) {
+              parts.push('Notes:', notes, '');
+            }
+            parts.push(
+              '### Apply status',
+              '',
+              '| Site | Status | Why |',
+              '| --- | --- | --- |',
+              ...applyRows,
+              '',
+              '### Diff',
+              '',
+              diffBlock,
+              '',
+              '_Conduit never merges. Verified fixes are pushed as a commit on this branch when tests pass._',
+            );
+            const body = parts.join('\n');
+
+            const { owner, repo } = context.repo;
+            const issue_number = context.issue.number;
+            const { data: comments } = await github.rest.issues.listComments({
+              owner, repo, issue_number, per_page: 100,
+            });
+            const existing = comments.find(c => c.body && c.body.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner, repo, comment_id: existing.id, body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner, repo, issue_number, body,
+              });
+            }
+
+      - name: Push verified fix to PR branch
+        if: steps.secret.outputs.present == 'true'
+        run: |
+          git config user.name "conduit-bot"
+          git config user.email "conduit-bot@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No verified fix to commit."
+            exit 0
+          fi
+          git commit -m "fix: Conduit verified openai migration"
+          git push origin "HEAD:${{ github.head_ref }}"
