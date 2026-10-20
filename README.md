@@ -1,12 +1,17 @@
 # conduit-demo
 
-Public demo for the Nebius × NVIDIA hackathon: [Conduit](https://github.com/conduit-oss/conduit) (Apache-2.0) catching and fixing an OpenAI Python SDK break.
+Public demo for the Nebius × NVIDIA hackathon: [Conduit](https://github.com/conduit-oss/conduit) (Apache-2.0) catching and fixing SDK breaks.
 
 ## What this shows
 
-`main` pins `openai==0.28.1` and calls the legacy `openai.ChatCompletion.create(...)` API in `summarize.py`. Tests stub the **1.x** client surface (`OpenAI().chat.completions.create` → `.choices[0].message.content`), so they fail on the old code and pass only after a real migration.
+Two tiny apps on `main`:
 
-Open a PR that bumps `openai` in `requirements.txt`. The Conduit Action runs `impact` → `apply`, posts one PR comment (impact table, apply status, diff), and pushes a verified fix commit to the PR branch. **Conduit never merges.**
+- `summarize.py` — pinned `openai==0.28.1`, legacy `ChatCompletion.create`
+- `complete.py` — pinned `anthropic==0.125.0`, legacy `client.completions.create` (removed in anthropic 1.0, Aug 2026)
+
+Each test stubs **only the new client surface**, so tests fail before a real migration and pass after.
+
+Open a PR that bumps one pin in `requirements.txt`. The Conduit Action diffs pins vs the base branch, runs `impact` → `apply` for each changed dependency, posts one PR comment, and pushes a verified fix commit. **Conduit never merges.**
 
 ## How the Action works
 
@@ -14,8 +19,8 @@ Workflow: [`.github/workflows/conduit.yml`](.github/workflows/conduit.yml)
 
 1. Triggers on `pull_request` when requirements files change.
 2. Installs Conduit from `git+https://github.com/conduit-oss/conduit.git#subdirectory=conduit`.
-3. Reads the new `openai` pin from the PR’s `requirements.txt`.
-4. Reads the base-branch `openai` pin as `--from` and the PR pin as `--to`, then runs `conduit impact --dep openai --from … --to … --json` and `conduit apply --impact … --write --test-cmd "python -m pytest -q"` with `CONDUIT_APPLY_MODEL=nvidia/nemotron-3-super-120b-a12b`.
+3. Detects which `pkg==version` pins changed vs the base branch (not hard-coded to one package).
+4. For each changed pin, runs `conduit impact --dep <pkg> --from <base> --to <pr> --json`, merges the reports, then `conduit apply --impact … --write --test-cmd "python -m pytest -q"` with `CONDUIT_APPLY_MODEL=nvidia/nemotron-3-super-120b-a12b`.
 5. Posts or updates a single PR comment; commits and pushes verified edits. Never merges.
 
 ## Secret

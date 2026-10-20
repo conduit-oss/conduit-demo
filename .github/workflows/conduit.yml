@@ -90,38 +90,106 @@ jobs:
         run: |
           set -euo pipefail
           git fetch origin "${BASE_REF}" --depth=1
-          parse_openai_pin() {
-            python - "$1" <<'PY'
-          import pathlib, re, sys
-          text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
-          m = re.search(r"(?mi)^\s*openai\s*==\s*([^\s#]+)", text)
-          if not m:
-              sys.exit(f"openai pin not found in {sys.argv[1]}")
-          print(m.group(1).strip())
-          PY
-          }
           git show "origin/${BASE_REF}:requirements.txt" > /tmp/base-requirements.txt
-          FROM_VERSION="$(parse_openai_pin /tmp/base-requirements.txt)"
-          TO_VERSION="$(parse_openai_pin requirements.txt)"
-          echo "from_version=${FROM_VERSION}" >> "$GITHUB_OUTPUT"
-          echo "to_version=${TO_VERSION}" >> "$GITHUB_OUTPUT"
-          conduit impact --dep openai --from "${FROM_VERSION}" --to "${TO_VERSION}" --json > impact.json
+          python - <<'PY'
+          import json, os, pathlib, re, subprocess, sys
+
+          pin_re = re.compile(r"(?mi)^\s*([A-Za-z0-9_.-]+)\s*==\s*([^\s#]+)")
+
+          def pins(path: pathlib.Path) -> dict[str, tuple[str, str]]:
+              out: dict[str, tuple[str, str]] = {}
+              for m in pin_re.finditer(path.read_text(encoding="utf-8")):
+                  out[m.group(1).lower()] = (m.group(1), m.group(2).strip())
+              return out
+
+          base = pins(pathlib.Path("/tmp/base-requirements.txt"))
+          head = pins(pathlib.Path("requirements.txt"))
+          changed = []
+          for key, (name, to_ver) in head.items():
+              if key == "pytest" or key not in base:
+                  continue
+              from_ver = base[key][1]
+              if from_ver != to_ver:
+                  changed.append((name, from_ver, to_ver))
+          if not changed:
+              sys.exit("No dependency pin changes vs base requirements.txt")
+
+          merged = {
+              "dependency": ",".join(n for n, _, _ in changed),
+              "impacts": [],
+              "deprecations": [],
+              "diffed": [],
+              "notes": [],
+          }
+          summaries = []
+          for name, from_ver, to_ver in changed:
+              summaries.append(f"{name} {from_ver}->{to_ver}")
+              out = subprocess.check_output(
+                  [
+                      "conduit", "impact",
+                      "--dep", name,
+                      "--from", from_ver,
+                      "--to", to_ver,
+                      "--json",
+                  ],
+                  text=True,
+              )
+              payload = json.loads(out)
+              merged["impacts"].extend(payload.get("impacts") or [])
+              merged["deprecations"].extend(payload.get("deprecations") or [])
+              merged["diffed"].extend(payload.get("diffed") or [])
+              merged["notes"].extend(payload.get("notes") or [])
+
+          merged["diffed"] = sorted(set(merged["diffed"]))
+          pathlib.Path("impact.json").write_text(
+              json.dumps(merged, indent=2) + "\n", encoding="utf-8"
+          )
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
+              fh.write(f"dep_summary={'; '.join(summaries)}\n")
+              fh.write(f"from_version={changed[0][1]}\n")
+              fh.write(f"to_version={changed[0][2]}\n")
+
+          # Prefer tests for modules named in impact sites so other demos
+          # on main do not fail an unrelated apply verification.
+          modules = sorted({
+              pathlib.Path(site.get("path") or "").stem
+              for item in merged.get("impacts") or []
+              for site in (item.get("sites") or [])
+              if site.get("path")
+          })
+          test_files = [
+              f"test_{name}.py"
+              for name in modules
+              if name and pathlib.Path(f"test_{name}.py").is_file()
+          ]
+          test_cmd = (
+              "python -m pytest -q " + " ".join(test_files)
+              if test_files
+              else "python -m pytest -q"
+          )
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
+              fh.write(f"test_cmd={test_cmd}\n")
+          pathlib.Path("/tmp/conduit-test-cmd.txt").write_text(test_cmd + "\n", encoding="utf-8")
+          PY
+          TEST_CMD="$(cat /tmp/conduit-test-cmd.txt)"
           set +e
-          conduit apply --impact impact.json --write --test-cmd "python -m pytest -q" --json > apply.json
+          conduit apply --impact impact.json --write --test-cmd "${TEST_CMD}" --json > apply.json
           echo "apply_exit=$?" >> "$GITHUB_OUTPUT"
           set -e
-          git diff -- summarize.py > apply.diff || true
+          git diff -- '*.py' > apply.diff || true
 
       - name: Comment impact, apply status, and diff
         if: steps.secret.outputs.present == 'true'
         uses: actions/github-script@v7
         env:
+          DEP_SUMMARY: ${{ steps.conduit.outputs.dep_summary }}
           FROM_VERSION: ${{ steps.conduit.outputs.from_version }}
           TO_VERSION: ${{ steps.conduit.outputs.to_version }}
         with:
           script: |
             const fs = require('fs');
             const marker = '<!-- conduit-hackathon-demo -->';
+            const depSummary = process.env.DEP_SUMMARY || '';
             const fromVersion = process.env.FROM_VERSION || '';
             const toVersion = process.env.TO_VERSION || '';
 
@@ -183,7 +251,7 @@ jobs:
               marker,
               '## Conduit',
               '',
-              `Impact for \`openai\` \`${fromVersion}\` → \`${toVersion}\`. Apply model: \`nvidia/nemotron-3-super-120b-a12b\`.`,
+              `Impact for \`${depSummary || (fromVersion + ' → ' + toVersion)}\`. Apply model: \`nvidia/nemotron-3-super-120b-a12b\`.`,
               '',
               '### Impact',
               '',
@@ -231,11 +299,11 @@ jobs:
         run: |
           git config user.name "conduit-bot"
           git config user.email "conduit-bot@users.noreply.github.com"
-          # Only stage source edits from apply --write (never artifacts).
-          git add -- summarize.py
+          # Stage tracked source edits from apply --write (never artifacts).
+          git add -u -- .
           if git diff --cached --quiet; then
             echo "No verified fix to commit."
             exit 0
           fi
-          git commit -m "fix: Conduit verified openai migration"
+          git commit -m "fix: Conduit verified dependency migration"
           git push origin "HEAD:${{ github.head_ref }}"
