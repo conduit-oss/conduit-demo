@@ -158,10 +158,16 @@ jobs:
               impactRows.push('| _(none)_ | | | | |');
             }
 
+            function shortWhy(text) {
+              const raw = (text || '').replace(/\|/g, '\\|').trim();
+              if (!raw) return '';
+              const sentence = raw.split(/(?<=[.!?])\s+/)[0] || raw;
+              return sentence.length > 120 ? sentence.slice(0, 117) + '...' : sentence;
+            }
             const applyRows = [];
             for (const item of (apply.results || [])) {
               applyRows.push(
-                `| ${item.path || ''}:${item.line || ''} | ${item.status || ''} | ${(item.why || item.error || '').replace(/\|/g, '\\|')} |`
+                `| ${item.path || ''}:${item.line || ''} | ${item.status || ''} | ${shortWhy(item.why || item.error || '')} |`
               );
             }
             if (!applyRows.length) {
