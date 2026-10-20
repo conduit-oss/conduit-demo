@@ -15,7 +15,7 @@ Workflow: [`.github/workflows/conduit.yml`](.github/workflows/conduit.yml)
 1. Triggers on `pull_request` when requirements files change.
 2. Installs Conduit from `git+https://github.com/conduit-oss/conduit.git#subdirectory=conduit`.
 3. Reads the new `openai` pin from the PR’s `requirements.txt`.
-4. Runs `conduit impact --dep openai --to <version> --json`, then `conduit apply --impact … --write --test-cmd "python -m pytest -q"` with `CONDUIT_APPLY_MODEL=nvidia/nemotron-3-super-120b-a12b`.
+4. Reads the base-branch `openai` pin as `--from` and the PR pin as `--to`, then runs `conduit impact --dep openai --from … --to … --json` and `conduit apply --impact … --write --test-cmd "python -m pytest -q"` with `CONDUIT_APPLY_MODEL=nvidia/nemotron-3-super-120b-a12b`.
 5. Posts or updates a single PR comment; commits and pushes verified edits. Never merges.
 
 ## Secret
