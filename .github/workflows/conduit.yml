@@ -225,7 +225,8 @@ jobs:
         run: |
           git config user.name "conduit-bot"
           git config user.email "conduit-bot@users.noreply.github.com"
-          git add -A
+          # Only stage source edits from apply --write (never artifacts).
+          git add -- summarize.py
           if git diff --cached --quiet; then
             echo "No verified fix to commit."
             exit 0
